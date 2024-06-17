@@ -1,15 +1,15 @@
+#include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
 #include <syslog.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <sys/resource.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <unistd.h>
 #include "libconfig.h"
 
 #define APP_NAME "FILE_DAEMON"
@@ -17,7 +17,7 @@
 #define DEFAULT_CFG_FILE "./daemon.cfg"
 #define GREETING "Здравствуйте, введите команды check для получения размера файла или stop для завершения работы сервера\n"
 #define FILE_SIZE_MSG "Размер отслеживаемого файла (байт): "
-#define REPEATE_MSG "Получена неизвестная команда. Повторите ввод (ckeck или stop).\n"
+#define REPEAT_MSG "Получена неизвестная команда. Повторите ввод (check или stop).\n"
 #define NOFILE_MSG "Не могу найти файл. Останавливаю сервер\n"
 
 void checkArgs(int* argc, char* argv[]) {
@@ -43,11 +43,9 @@ long getFileSize(char* filename) {
     if(status == 0) {
         return (long)finfo.st_size;
     }
-    else {
-        printf("Cannot get file info.\n");
-        syslog(LOG_ERR, "Cannot get file info %s", filename);
-        return(-1);
-    }
+    printf("Cannot get file info.\n");
+    syslog(LOG_ERR, "Cannot get file info %s", filename);
+    return(-1);
 
 }
 
@@ -56,13 +54,13 @@ char* getFileName(char* config_file) {
     const char* filename;
     char* filename_res = (char*) malloc(100 * sizeof(char));
     syslog(LOG_INFO, "Пробуем запустить конфигурацию %s", config_file);
-    if(! config_read_file(&cfg, config_file))
+    if(0 == config_read_file(&cfg, config_file))
     {
         syslog(LOG_ERR, "Ошибка чтения конфигурации %s:%d - %s", config_error_file(&cfg), config_error_line(&cfg), config_error_text(&cfg));
         config_destroy(&cfg);
         exit(EXIT_FAILURE);
     }
-    
+
     if(config_lookup_string(&cfg, "file", &filename)) {
         syslog(LOG_INFO, "Имя отслеживаемого файла: %s", filename);
         strncpy(filename_res, filename, strlen(filename));
@@ -125,7 +123,7 @@ void daemonize(const char* cmd)
     //     syslog(LOG_CRIT, "невозможно сделать текущим рабочим каталогом /");
     // }
     /*
-     * Закрыть все открытые файловые дескрипторы.
+    * Закрыть все открытые файловые дескрипторы.
      */
     if (rl.rlim_max == RLIM_INFINITY) {
         rl.rlim_max = 1024;
@@ -146,12 +144,12 @@ void daemonize(const char* cmd)
 }
 
 void socket_listen(char* filename) {
-    int sock, msgsock, rval; 
+   int sock, msgsock, rval; 
     struct sockaddr_un server; 
     char buf[100];
     const char* greeting = GREETING;
     const char* filesize = FILE_SIZE_MSG;
-    const char* repeate = REPEATE_MSG;
+    const char* repeat = REPEAT_MSG;
     const char* nofile = NOFILE_MSG;
     sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) {
@@ -160,7 +158,7 @@ void socket_listen(char* filename) {
     }
     server.sun_family = AF_UNIX;
     strcpy(server.sun_path, U_SOCKET_NAME);
-    if (bind(sock, (struct sockaddr *) &server, sizeof(struct sockaddr_un))) {
+   if (bind(sock, (struct sockaddr *) &server, sizeof(struct sockaddr_un))) {
         syslog(LOG_ERR, "Невозможно присвоить адрес unix socket-у, выход.");
         exit(1); 
     }
@@ -172,52 +170,45 @@ void socket_listen(char* filename) {
             syslog(LOG_ERR, "Невозможно открыть на сокете входящее соединение. Серверный сокет закрываем. Выход");
             break; 
         }
-        else {
-            send(msgsock, greeting, strlen(greeting), 0);
-            do {
-                // bzero(buf, sizeof(buf));
-                memset(buf, 0 , sizeof(buf));
-                if ((rval = read(msgsock, buf, 100)) < 0) {
-                    syslog(LOG_WARNING, "Невозможно прочитать входящее сообщение");
+        send(msgsock, greeting, strlen(greeting), 0);
+        do {
+            // bzero(buf, sizeof(buf));
+            memset(buf, 0 , sizeof(buf));
+            if ((rval = read(msgsock, buf, 100)) < 0) {
+                syslog(LOG_WARNING, "Невозможно прочитать входящее сообщение");
+            } else if (rval == 0) {
+                syslog(LOG_ERR, "Ошибка соединения");
+            } else {
+                if (0 == strncmp(buf, "stop", 4)) {
+                    syslog(LOG_INFO, "Получена команда остановки программы. Закрытие сокета %s", U_SOCKET_NAME);
+                    close(msgsock);
+                    close(sock);
+                    unlink(U_SOCKET_NAME);
+                    return;
                 }
-                
-                else if (rval == 0) {
-                    syslog(LOG_ERR, "Ошибка соединения");
-                }
-                else {
-
-                    if (!strncmp(buf, "stop", 4)) {
-                        syslog(LOG_INFO, "Получена команда остановки программы. Закрытие сокета %s", U_SOCKET_NAME);
+                if (0 == strncmp(buf, "check", 5)) {
+                    syslog(LOG_INFO, "Получена запрос на проверку размера файла");
+                    long fsize = getFileSize(filename);
+                    if (fsize > -1) {
+                        char str[10];
+                        sprintf(str, "%ld", fsize);
+                        send(msgsock, filesize, strlen(filesize), 0);
+                        send(msgsock, str, strlen(str), 0);
+                        send(msgsock, "\n", 1, 0);
+                        close(msgsock);
+                    } else {
+                        syslog(LOG_ERR, "Файл %s невозможно открыть/прочитать", filename);
+                        send(msgsock, nofile, strlen(nofile), 0);
                         close(msgsock);
                         close(sock);
                         unlink(U_SOCKET_NAME);
                         return;
-                    } else if (!strncmp(buf, "check", 5)) {
-                        syslog(LOG_INFO, "Получена запрос на проверку размера файла");
-                        long fsize = getFileSize(filename);
-                        if (fsize > -1) {
-                            char str[10];
-                            sprintf(str, "%ld", fsize);
-                            send(msgsock, filesize, strlen(filesize), 0);
-                            send(msgsock, str, strlen(str), 0);
-                            send(msgsock, "\n", 1, 0);
-                            close(msgsock);
-                        }
-                        else {
-                            syslog(LOG_ERR, "Файл %s невозможно открыть/прочитать", filename);
-                            send(msgsock, nofile, strlen(nofile), 0);
-                            close(msgsock);
-                            close(sock);
-                            unlink(U_SOCKET_NAME);
-                            return;
-                        }
-                        
-                    } else {
-                        send(msgsock, repeate, strlen(repeate), 0); 
                     }
+                } else {
+                    send(msgsock, repeat, strlen(repeat), 0); 
                 }
-            } while (rval > 0);
-        }
+            }
+        } while (rval > 0);
         close(msgsock);
     }
     close(sock);
@@ -239,9 +230,7 @@ int main(int argc, char* argv[]) {
     else if ((argc == 2) && (strcmp(argv[1], "-d\0") != 0)) {
         CFG_FILE_NAME = argv[1];
     }
-    
-    (void)argc;
-    
+
     char* filename = getFileName(CFG_FILE_NAME);
     if (daemon) {
         daemonize(APP_NAME);
